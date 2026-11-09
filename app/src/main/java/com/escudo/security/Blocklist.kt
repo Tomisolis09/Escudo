@@ -3,6 +3,7 @@ package com.escudo.security
 import android.content.Context
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import java.io.File
 import java.net.URL
@@ -26,6 +27,35 @@ object Blocklist {
     @Volatile private var threats: Set<String> = emptySet()
     var adsSize by mutableIntStateOf(defaults.size)
     var threatsSize by mutableIntStateOf(0)
+
+    // ---- Lista blanca: dominios que nunca se bloquean (incluye sus subdominios) ----
+    @Volatile private var allow: Set<String> = emptySet()
+    var allowList by mutableStateOf<List<String>>(emptyList())
+    private fun sp(c: Context) = c.getSharedPreferences("escudo", Context.MODE_PRIVATE)
+    private fun setAllow(s: Set<String>) { allow = s; allowList = s.sorted() }
+    fun loadAllow(c: Context) { setAllow(sp(c).getStringSet("allow", emptySet())!!.toSet()) }
+    /** Devuelve false si el texto no parece un dominio válido. */
+    fun addAllow(c: Context, input: String): Boolean {
+        val d = input.trim().lowercase().removePrefix("https://").removePrefix("http://")
+            .removePrefix("www.").substringBefore('/').substringBefore(':')
+        if (!Regex("^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$").matches(d)) return false
+        val n = allow + d
+        sp(c).edit().putStringSet("allow", n).apply(); setAllow(n); return true
+    }
+    fun removeAllow(c: Context, d: String) {
+        val n = allow - d
+        sp(c).edit().putStringSet("allow", n).apply(); setAllow(n)
+    }
+    private fun isAllowed(name: String): Boolean {
+        if (allow.isEmpty()) return false
+        var d = name
+        while (true) {
+            if (d in allow) return true
+            val i = d.indexOf('.')
+            if (i < 0) return false
+            d = d.substring(i + 1)
+        }
+    }
 
     private fun file(c: Context, i: Int) = File(c.filesDir, "list_$i.txt")
 
@@ -60,6 +90,7 @@ object Blocklist {
 
     /** 0 = permitido, 1 = anuncio/rastreador, 2 = sitio malicioso/phishing */
     fun category(name: String): Int {
+        if (isAllowed(name)) return 0
         var d = name
         while (true) {
             if (d in threats) return 2

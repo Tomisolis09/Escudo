@@ -47,7 +47,7 @@ class MainActivity : ComponentActivity() {
             statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
             navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT)
         )
-        Blocklist.load(this); Signatures.load(this); Prefs.load(this)
+        Blocklist.load(this); Blocklist.loadAllow(this); Signatures.load(this); Prefs.load(this)
         if (Build.VERSION.SDK_INT >= 33)
             registerForActivityResult(ActivityResultContracts.RequestPermission()) {}.launch(Manifest.permission.POST_NOTIFICATIONS)
         // si las protecciones estaban activadas, volver a levantar el servicio
@@ -140,6 +140,9 @@ fun App() {
                     onChange = { change(Stats.realtime, it) }
                 )
 
+                SectionLabel("LISTA BLANCA")
+                AllowListCard()
+
                 OutlinedButton(
                     onClick = {
                         scope.launch {
@@ -203,6 +206,7 @@ private fun SectionLabel(text: String) {
 
 @Composable
 private fun HeroCard(results: List<AppRisk>?, scanning: Boolean, onScan: () -> Unit) {
+    var detail by remember { mutableStateOf(false) }
     val risky = results?.filter { it.level != Level.LOW }
     val target = when { risky == null -> Amber; risky.isEmpty() -> Green; else -> Red }
     val color by animateColorAsState(target, label = "status")
@@ -253,6 +257,31 @@ private fun HeroCard(results: List<AppRisk>?, scanning: Boolean, onScan: () -> U
                         Spacer(Modifier.width(10.dp))
                         Text(type, Modifier.weight(1f), fontSize = 14.sp)
                         Text(list.size.toString(), fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = worst)
+                    }
+                }
+            }
+            TextButton(onClick = { detail = !detail }) {
+                Text(if (detail) "Ocultar detalle" else "Ver detalle", color = Accent)
+            }
+            if (detail) {
+                Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    risky.forEach { r ->
+                        val c = if (r.level == Level.HIGH) Red else Amber
+                        Column(
+                            Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp))
+                                .background(Bg0.copy(alpha = 0.55f)).padding(12.dp)
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Column(Modifier.weight(1f)) {
+                                    Text(r.name, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                                    Text(r.type, fontSize = 12.sp, color = c)
+                                }
+                                Text("${r.level.label} · ${r.score}", fontSize = 12.sp, color = c)
+                            }
+                            r.reasons.forEach {
+                                Text("• $it", fontSize = 12.sp, color = TextMuted, modifier = Modifier.padding(top = 3.dp))
+                            }
+                        }
                     }
                 }
             }
@@ -319,6 +348,49 @@ private fun ProtectionCard(
             Text(value.toString(), fontSize = 26.sp, fontWeight = FontWeight.Bold)
             Spacer(Modifier.width(8.dp))
             Text(valueLabel, fontSize = 12.sp, color = TextMuted, modifier = Modifier.padding(bottom = 4.dp))
+        }
+    }
+}
+
+@Composable
+private fun AllowListCard() {
+    val ctx = LocalContext.current
+    var text by remember { mutableStateOf("") }
+    var error by remember { mutableStateOf(false) }
+    Column(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(22.dp)).background(CardBg)
+            .border(1.dp, CardBorder, RoundedCornerShape(22.dp)).padding(18.dp)
+    ) {
+        Text("Sitios permitidos", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.height(4.dp))
+        Text(
+            "Si un sitio o una app deja de funcionar, agregá su dominio acá y nunca se va a bloquear.",
+            fontSize = 13.sp, lineHeight = 18.sp, color = TextMuted
+        )
+        Spacer(Modifier.height(12.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            OutlinedTextField(
+                value = text, onValueChange = { text = it; error = false },
+                singleLine = true, isError = error, shape = RoundedCornerShape(12.dp),
+                placeholder = { Text("ejemplo.com") },
+                supportingText = { if (error) Text("Escribí un dominio válido") },
+                modifier = Modifier.weight(1f)
+            )
+            Spacer(Modifier.width(10.dp))
+            Button(
+                onClick = { if (Blocklist.addAllow(ctx, text)) text = "" else error = true },
+                shape = RoundedCornerShape(12.dp), modifier = Modifier.height(56.dp)
+            ) { Icon(Icons.Default.Add, "Agregar") }
+        }
+        Blocklist.allowList.forEach { d ->
+            Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.CheckCircle, null, tint = Green, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(10.dp))
+                Text(d, Modifier.weight(1f), fontSize = 14.sp)
+                IconButton(onClick = { Blocklist.removeAllow(ctx, d) }) {
+                    Icon(Icons.Default.Close, "Quitar", tint = TextMuted)
+                }
+            }
         }
     }
 }

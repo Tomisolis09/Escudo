@@ -68,13 +68,22 @@ class AdBlockVpnService : VpnService() {
 
     override fun onDestroy() { stop(); super.onDestroy() }
 
+    private fun goForeground() {
+        val n = Alerts.foreground(this)
+        if (Build.VERSION.SDK_INT >= 34)
+            startForeground(1, n, android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+        else startForeground(1, n)
+    }
+
     private fun start() {
         if (running) return
+        try { goForeground() } catch (_: Exception) {}
         tun = Builder().setSession("Escudo")
             .addAddress("10.111.222.1", 24)
             .addDnsServer("10.111.222.2")
             .addRoute("10.111.222.2", 32)
-            .establish() ?: return
+            .establish()
+        if (tun == null) { stop(); return }
         running = true; Stats.running = true
         val f = IntentFilter(Intent.ACTION_PACKAGE_ADDED).apply { addDataScheme("package") }
         if (Build.VERSION.SDK_INT >= 33) registerReceiver(pkgReceiver, f, Context.RECEIVER_EXPORTED)
@@ -86,6 +95,7 @@ class AdBlockVpnService : VpnService() {
         running = false; Stats.running = false
         try { unregisterReceiver(pkgReceiver) } catch (_: Exception) {}
         try { tun?.close() } catch (_: Exception) {}
+        try { stopForeground(STOP_FOREGROUND_REMOVE) } catch (_: Exception) {}
         tun = null; stopSelf()
     }
 
