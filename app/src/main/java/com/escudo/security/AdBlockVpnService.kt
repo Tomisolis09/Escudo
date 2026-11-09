@@ -20,8 +20,19 @@ import java.util.concurrent.Executors
 
 object Stats {
     var running by mutableStateOf(false)
+    var realtime by mutableStateOf(false)   // protección en tiempo real (apps nuevas + phishing/malware)
+    var adblock by mutableStateOf(false)    // bloqueador de anuncios y rastreadores
     var ads by mutableIntStateOf(0)
     var threats by mutableIntStateOf(0)
+}
+
+object Prefs {
+    private fun sp(c: Context) = c.getSharedPreferences("escudo", Context.MODE_PRIVATE)
+    fun load(c: Context) { Stats.realtime = sp(c).getBoolean("rt", false); Stats.adblock = sp(c).getBoolean("ad", false) }
+    fun save(c: Context, rt: Boolean, ad: Boolean) {
+        sp(c).edit().putBoolean("rt", rt).putBoolean("ad", ad).apply()
+        Stats.realtime = rt; Stats.adblock = ad
+    }
 }
 
 /**
@@ -39,7 +50,7 @@ class AdBlockVpnService : VpnService() {
     /** Protección en tiempo real: analiza cada app apenas se instala. */
     private val pkgReceiver = object : BroadcastReceiver() {
         override fun onReceive(c: Context, i: Intent) {
-            if (i.getBooleanExtra(Intent.EXTRA_REPLACING, false)) return
+            if (!Stats.realtime || i.getBooleanExtra(Intent.EXTRA_REPLACING, false)) return
             val pkg = i.data?.schemeSpecificPart ?: return
             pool.execute {
                 AppScanner.scanOne(applicationContext, pkg)?.let {
@@ -50,7 +61,8 @@ class AdBlockVpnService : VpnService() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_STOP) { stop(); return START_NOT_STICKY }
+        Prefs.load(applicationContext)
+        if (intent?.action == ACTION_STOP || (!Stats.realtime && !Stats.adblock)) { stop(); return START_NOT_STICKY }
         start(); return START_STICKY
     }
 
@@ -98,7 +110,9 @@ class AdBlockVpnService : VpnService() {
         val dns = pkt.copyOfRange(ihl + 8, pkt.size)
         val q = parseQuestion(dns) ?: return
         val cat = Blocklist.category(q.first)
-        val resp = if (cat != 0) {
+        // cat 2 = amenazas (protección en tiempo real); otro != 0 = anuncios (bloqueador)
+        val block = (cat == 2 && Stats.realtime) || (cat != 0 && cat != 2 && Stats.adblock)
+        val resp = if (block) {
             if (cat == 2) Stats.threats++ else Stats.ads++
             nxdomain(dns, q.second)
         } else forward(dns) ?: return

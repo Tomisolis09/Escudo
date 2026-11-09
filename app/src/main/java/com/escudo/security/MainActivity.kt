@@ -4,25 +4,36 @@ import android.Manifest
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
-import android.net.Uri
 import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
@@ -32,24 +43,66 @@ import kotlinx.coroutines.withContext
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        Blocklist.load(this); Signatures.load(this)
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
+            navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT)
+        )
+        Blocklist.load(this); Signatures.load(this); Prefs.load(this)
         if (Build.VERSION.SDK_INT >= 33)
             registerForActivityResult(ActivityResultContracts.RequestPermission()) {}.launch(Manifest.permission.POST_NOTIFICATIONS)
-        setContent { MaterialTheme(colorScheme = darkColorScheme()) { App() } }
+        // si las protecciones estaban activadas, volver a levantar el servicio
+        if ((Stats.realtime || Stats.adblock) && VpnService.prepare(this) == null) startVpn(this)
+        setContent {
+            MaterialTheme(
+                colorScheme = darkColorScheme(
+                    primary = Accent, background = Bg0, surface = CardBg,
+                    onSurface = TextMain, onBackground = TextMain, onPrimary = Color.White
+                )
+            ) { App() }
+        }
     }
 }
 
+// ---- Paleta ----
+private val Bg0 = Color(0xFF07111F)
+private val Bg1 = Color(0xFF0C2140)
+private val CardBg = Color(0xFF10233F)
+private val CardBorder = Color(0xFF1F3659)
+private val TextMain = Color(0xFFF2F6FC)
+private val TextMuted = Color(0xFF8FA3BF)
+private val Accent = Color(0xFF3D8BFF)
 private val Green = Color(0xFF2ECC71)
-private val Red = Color(0xFFE74C3C)
-private val Amber = Color(0xFFF39C12)
+private val Red = Color(0xFFFF5A5F)
+private val Amber = Color(0xFFFFB020)
+
+private fun startVpn(c: Context) { c.startService(Intent(c, AdBlockVpnService::class.java)) }
+private fun stopVpn(c: Context) {
+    c.startService(Intent(c, AdBlockVpnService::class.java).setAction(AdBlockVpnService.ACTION_STOP))
+}
 
 @Composable
 fun App() {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
-    var tab by remember { mutableIntStateOf(0) }
     var results by remember { mutableStateOf<List<AppRisk>?>(null) }
     var scanning by remember { mutableStateOf(false) }
+    var updating by remember { mutableStateOf(false) }
+    var msg by remember { mutableStateOf("") }
+    var revert by remember { mutableStateOf<(() -> Unit)?>(null) }
+
+    val vpnPermission = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+        if (it.resultCode == Activity.RESULT_OK) startVpn(ctx) else revert?.invoke()
+    }
+
+    // cambia el estado de las dos protecciones (comparten el mismo VPN local)
+    val change: (Boolean, Boolean) -> Unit = { rt, ad ->
+        val oldRt = Stats.realtime; val oldAd = Stats.adblock
+        Prefs.save(ctx, rt, ad)
+        if (rt || ad) {
+            val i = VpnService.prepare(ctx)
+            if (i != null) { revert = { Prefs.save(ctx, oldRt, oldAd) }; vpnPermission.launch(i) } else startVpn(ctx)
+        } else stopVpn(ctx)
+    }
 
     val scan: () -> Unit = {
         scope.launch {
@@ -58,119 +111,214 @@ fun App() {
             scanning = false
         }
     }
-    val tabs = listOf("Inicio" to Icons.Default.Home, "Escáner" to Icons.Default.Search, "Protección" to Icons.Default.Lock)
 
-    Scaffold(bottomBar = {
-        NavigationBar {
-            tabs.forEachIndexed { i, (label, icon) ->
-                NavigationBarItem(selected = tab == i, onClick = { tab = i },
-                    icon = { Icon(icon, label) }, label = { Text(label) })
-            }
-        }
-    }) { pad ->
-        Box(Modifier.padding(pad).fillMaxSize()) {
-            when (tab) {
-                0 -> HomeScreen(results, scanning, onScan = { tab = 1; scan() })
-                1 -> ScanScreen(results, scanning, scan)
-                else -> ProtectionScreen()
-            }
-        }
-    }
-}
+    Surface(color = Color.Transparent, contentColor = TextMain) {
+        Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Bg1, Bg0)))) {
+            Column(
+                Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()
+                    .verticalScroll(rememberScrollState()).padding(horizontal = 20.dp, vertical = 16.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp)
+            ) {
+                Header()
+                HeroCard(results, scanning, scan)
 
-@Composable
-fun StatRow(label: String, value: String, color: Color = Color.White) {
-    Row(Modifier.fillMaxWidth().padding(vertical = 4.dp)) { Text(label, Modifier.weight(1f)); Text(value, color = color) }
-}
+                SectionLabel("PROTECCIÓN")
+                ProtectionCard(
+                    icon = Icons.Default.Lock,
+                    title = "Protección en tiempo real",
+                    subtitle = "Analiza cada app nueva y bloquea sitios de phishing y malware.",
+                    value = Stats.threats, valueLabel = "sitios peligrosos bloqueados",
+                    checked = Stats.realtime,
+                    onChange = { change(it, Stats.adblock) }
+                )
+                ProtectionCard(
+                    icon = Icons.Default.Close,
+                    title = "Bloqueador de anuncios",
+                    subtitle = "Elimina anuncios y rastreadores en tus apps y en el navegador.",
+                    value = Stats.ads, valueLabel = "anuncios y rastreadores bloqueados",
+                    checked = Stats.adblock,
+                    onChange = { change(Stats.realtime, it) }
+                )
 
-@Composable
-fun HomeScreen(results: List<AppRisk>?, scanning: Boolean, onScan: () -> Unit) {
-    val threats = results?.count { it.level != Level.LOW }
-    val color = when { threats == null -> Amber; threats == 0 -> Green; else -> Red }
-    Column(Modifier.fillMaxSize().padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
-        Icon(if (threats == 0) Icons.Default.CheckCircle else Icons.Default.Warning, null, tint = color, modifier = Modifier.size(110.dp))
-        Spacer(Modifier.height(12.dp))
-        Text(when { threats == null -> "Todavía no escaneaste"; threats == 0 -> "Tu dispositivo está limpio"; else -> "$threats amenazas / apps para revisar" }, fontSize = 22.sp)
-        Spacer(Modifier.height(24.dp))
-        StatRow("Protección en tiempo real", if (Stats.running) "ACTIVA" else "Apagada", if (Stats.running) Green else Amber)
-        StatRow("Anuncios y rastreadores bloqueados", Stats.ads.toString())
-        StatRow("Sitios maliciosos / phishing bloqueados", Stats.threats.toString(), if (Stats.threats > 0) Red else Color.White)
-        Spacer(Modifier.height(24.dp))
-        Button(onClick = onScan, enabled = !scanning) { Text(if (scanning) "Escaneando…" else "Escanear ahora") }
-    }
-}
-
-@Composable
-fun ScanScreen(results: List<AppRisk>?, scanning: Boolean, onScan: () -> Unit) {
-    val ctx = LocalContext.current
-    // al volver de la pantalla de desinstalación, se vuelve a escanear
-    val uninstall = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { onScan() }
-    Column(Modifier.fillMaxSize().padding(16.dp)) {
-        Button(onClick = onScan, enabled = !scanning, modifier = Modifier.fillMaxWidth()) {
-            Text(if (scanning) "Escaneando…" else "Escanear apps instaladas")
-        }
-        if (scanning) LinearProgressIndicator(Modifier.fillMaxWidth().padding(top = 8.dp))
-        Spacer(Modifier.height(8.dp))
-        LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            items(results ?: emptyList()) { r ->
-                val c = when (r.level) { Level.HIGH -> Red; Level.MEDIUM -> Amber; Level.LOW -> Green }
-                Card(Modifier.fillMaxWidth()) {
-                    Column(Modifier.padding(12.dp)) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Column(Modifier.weight(1f)) {
-                                Text(r.name, fontSize = 16.sp)
-                                Text(r.type, fontSize = 12.sp, color = c)
-                            }
-                            Text("${r.level.label} · ${r.score}", color = c)
+                OutlinedButton(
+                    onClick = {
+                        scope.launch {
+                            updating = true
+                            val ok = withContext(Dispatchers.IO) { Blocklist.update(ctx) && Signatures.update(ctx) }
+                            msg = if (ok) "Listas actualizadas correctamente" else "No se pudo descargar alguna lista"
+                            updating = false
                         }
-                        r.reasons.forEach { Text("• $it", fontSize = 12.sp, color = Color.LightGray) }
-                        if (r.level != Level.LOW) {
-                            TextButton(onClick = {
-                                uninstall.launch(Intent(Intent.ACTION_DELETE, Uri.parse("package:${r.pkg}")))
-                            }) { Text("Eliminar / desinstalar", color = Red) }
-                        }
-                    }
+                    },
+                    enabled = !updating,
+                    shape = RoundedCornerShape(14.dp),
+                    border = BorderStroke(1.dp, CardBorder),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = TextMain),
+                    modifier = Modifier.fillMaxWidth().height(48.dp)
+                ) {
+                    Icon(Icons.Default.Refresh, null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text(if (updating) "Descargando…" else "Actualizar listas de amenazas")
+                }
+                if (msg.isNotEmpty()) {
+                    Text(msg, fontSize = 12.sp, color = TextMuted, modifier = Modifier.align(Alignment.CenterHorizontally))
+                }
+
+                Row(verticalAlignment = Alignment.Top, modifier = Modifier.padding(top = 4.dp)) {
+                    Icon(Icons.Default.Info, null, tint = TextMuted, modifier = Modifier.size(16.dp).padding(top = 2.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        "Usa un VPN local que solo filtra consultas DNS: tu tráfico no pasa por servidores nuestros. " +
+                            "Si tenés «DNS privado» activo en Ajustes, desactivalo para que el filtro funcione.",
+                        fontSize = 12.sp, lineHeight = 17.sp, color = TextMuted
+                    )
                 }
             }
         }
     }
 }
 
-private fun startVpn(c: Context) { c.startService(Intent(c, AdBlockVpnService::class.java)) }
+@Composable
+private fun Header() {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Box(
+            Modifier.size(42.dp).clip(RoundedCornerShape(12.dp))
+                .background(Brush.linearGradient(listOf(Accent, Color(0xFF2358C6)))),
+            contentAlignment = Alignment.Center
+        ) { Icon(Icons.Default.Lock, null, tint = Color.White, modifier = Modifier.size(22.dp)) }
+        Spacer(Modifier.width(12.dp))
+        Column {
+            Text("Escudo", fontSize = 22.sp, fontWeight = FontWeight.Bold)
+            Text("Seguridad para tu celular", fontSize = 12.sp, color = TextMuted)
+        }
+    }
+}
 
 @Composable
-fun ProtectionScreen() {
-    val ctx = LocalContext.current
-    val scope = rememberCoroutineScope()
-    var updating by remember { mutableStateOf(false) }
-    var msg by remember { mutableStateOf("") }
-    val launcher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
-        if (it.resultCode == Activity.RESULT_OK) startVpn(ctx)
+private fun SectionLabel(text: String) {
+    Text(
+        text, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 1.5.sp,
+        color = TextMuted, modifier = Modifier.padding(top = 6.dp, start = 4.dp)
+    )
+}
+
+@Composable
+private fun HeroCard(results: List<AppRisk>?, scanning: Boolean, onScan: () -> Unit) {
+    val risky = results?.filter { it.level != Level.LOW }
+    val target = when { risky == null -> Amber; risky.isEmpty() -> Green; else -> Red }
+    val color by animateColorAsState(target, label = "status")
+    val title = when {
+        scanning -> "Analizando tu dispositivo…"
+        risky == null -> "Sin analizar"
+        risky.isEmpty() -> "Todo en orden"
+        else -> "${risky.size} ${if (risky.size == 1) "elemento" else "elementos"} para revisar"
     }
-    Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("Protección en tiempo real", Modifier.weight(1f), fontSize = 18.sp)
-            Switch(checked = Stats.running, onCheckedChange = { on ->
-                if (on) {
-                    val i = VpnService.prepare(ctx)
-                    if (i != null) launcher.launch(i) else startVpn(ctx)
-                } else ctx.startService(Intent(ctx, AdBlockVpnService::class.java).setAction(AdBlockVpnService.ACTION_STOP))
-            })
+    val n = results?.size ?: 0
+    val subtitle = when {
+        scanning -> "Esto puede tardar unos segundos"
+        results == null -> "Hacé un análisis para conocer el estado de tu dispositivo"
+        risky!!.isEmpty() -> "$n apps analizadas, sin amenazas"
+        else -> "$n apps analizadas"
+    }
+    Column(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(28.dp)).background(CardBg)
+            .border(1.dp, CardBorder, RoundedCornerShape(28.dp)).padding(22.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Box(
+            Modifier.size(116.dp).clip(CircleShape)
+                .background(Brush.radialGradient(listOf(color.copy(alpha = 0.28f), color.copy(alpha = 0.04f))))
+                .border(3.dp, color, CircleShape),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                if (risky != null && risky.isNotEmpty()) Icons.Default.Warning else Icons.Default.CheckCircle,
+                null, tint = color, modifier = Modifier.size(56.dp)
+            )
         }
-        Text("Bloquea anuncios (en apps y web), rastreadores, phishing y dominios de malware/ransomware, y te avisa si una app nueva es riesgosa apenas se instala.", fontSize = 13.sp, color = Color.Gray)
-        StatRow("Anuncios y rastreadores bloqueados", Stats.ads.toString())
-        StatRow("Sitios maliciosos / phishing bloqueados", Stats.threats.toString())
-        StatRow("Dominios de anuncios en la lista", Blocklist.adsSize.toString())
-        StatRow("Dominios de amenazas en la lista", Blocklist.threatsSize.toString())
-        Button(enabled = !updating, onClick = {
-            scope.launch {
-                updating = true
-                val ok = withContext(Dispatchers.IO) { Blocklist.update(ctx) && Signatures.update(ctx) }
-                msg = if (ok) "Listas actualizadas" else "No se pudo descargar alguna lista"
-                updating = false
+        Spacer(Modifier.height(16.dp))
+        Text(title, fontSize = 21.sp, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.height(4.dp))
+        Text(subtitle, fontSize = 13.sp, color = TextMuted)
+
+        if (risky != null && risky.isNotEmpty() && !scanning) {
+            Spacer(Modifier.height(16.dp))
+            Column(
+                Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(Bg0.copy(alpha = 0.55f)).padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                risky.groupBy { it.type }.entries.sortedByDescending { it.value.size }.forEach { (type, list) ->
+                    val worst = if (list.any { it.level == Level.HIGH }) Red else Amber
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(Modifier.size(8.dp).clip(CircleShape).background(worst))
+                        Spacer(Modifier.width(10.dp))
+                        Text(type, Modifier.weight(1f), fontSize = 14.sp)
+                        Text(list.size.toString(), fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = worst)
+                    }
+                }
             }
-        }) { Text(if (updating) "Descargando…" else "Actualizar listas de amenazas") }
-        if (msg.isNotEmpty()) Text(msg, color = Color.Gray)
-        Text("Usa un VPN local que solo filtra consultas DNS; tu tráfico no pasa por servidores nuestros. Si tenés «DNS privado» activo en Ajustes, desactivalo para que el filtro funcione.", fontSize = 12.sp, color = Color.Gray)
+        }
+
+        if (scanning) LinearProgressIndicator(
+            Modifier.fillMaxWidth().padding(top = 18.dp).clip(RoundedCornerShape(50)),
+            color = Accent, trackColor = CardBorder
+        )
+
+        Spacer(Modifier.height(20.dp))
+        Button(
+            onClick = onScan, enabled = !scanning, shape = RoundedCornerShape(16.dp),
+            colors = ButtonDefaults.buttonColors(containerColor = Accent, contentColor = Color.White,
+                disabledContainerColor = CardBorder, disabledContentColor = TextMuted),
+            modifier = Modifier.fillMaxWidth().height(54.dp)
+        ) {
+            Icon(Icons.Default.Search, null, modifier = Modifier.size(20.dp))
+            Spacer(Modifier.width(8.dp))
+            Text(if (scanning) "Analizando…" else "Analizar ahora", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+        }
+    }
+}
+
+@Composable
+private fun ProtectionCard(
+    icon: ImageVector, title: String, subtitle: String, value: Int, valueLabel: String,
+    checked: Boolean, onChange: (Boolean) -> Unit
+) {
+    val tint by animateColorAsState(if (checked) Green else TextMuted, label = "tint")
+    Column(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(22.dp)).background(CardBg)
+            .border(1.dp, if (checked) Green.copy(alpha = 0.45f) else CardBorder, RoundedCornerShape(22.dp))
+            .padding(18.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                Modifier.size(48.dp).clip(RoundedCornerShape(14.dp)).background(tint.copy(alpha = 0.16f)),
+                contentAlignment = Alignment.Center
+            ) { Icon(icon, null, tint = tint, modifier = Modifier.size(26.dp)) }
+            Spacer(Modifier.width(14.dp))
+            Column(Modifier.weight(1f)) {
+                Text(title, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.height(3.dp))
+                Text(
+                    if (checked) "ACTIVA" else "APAGADA", fontSize = 11.sp, fontWeight = FontWeight.Bold,
+                    letterSpacing = 1.sp, color = tint
+                )
+            }
+            Switch(
+                checked = checked, onCheckedChange = onChange,
+                colors = SwitchDefaults.colors(
+                    checkedThumbColor = Color.White, checkedTrackColor = Green,
+                    uncheckedThumbColor = TextMuted, uncheckedTrackColor = Bg0, uncheckedBorderColor = CardBorder
+                )
+            )
+        }
+        Spacer(Modifier.height(12.dp))
+        Text(subtitle, fontSize = 13.sp, lineHeight = 18.sp, color = TextMuted)
+        Spacer(Modifier.height(14.dp))
+        HorizontalDivider(color = CardBorder)
+        Spacer(Modifier.height(12.dp))
+        Row(verticalAlignment = Alignment.Bottom) {
+            Text(value.toString(), fontSize = 26.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.width(8.dp))
+            Text(valueLabel, fontSize = 12.sp, color = TextMuted, modifier = Modifier.padding(bottom = 4.dp))
+        }
     }
 }
